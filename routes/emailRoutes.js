@@ -35,5 +35,15 @@ router.get("/:id", async (req, res) => {
   }
 });
 
+router.get("/", async (_req, res) => {
+  try {
+    // fetch all emails from MongoDB
+    const emails = await Email.find().sort({ createdAt: -1 }); // latest first
+    res.status(200).json(emails);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
 
