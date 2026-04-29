@@ -44,10 +44,50 @@ const emailSchema = new mongoose.Schema(
       required: true,
     },
 
+    // RFC mail threading helpers
+    messageId: {
+      type: String,
+      index: true,
+    },
+
+    inReplyTo: String,
+
+    references: [String],
+
     // optional fields
     cc: [String],
     bcc: [String],
     customerName: String,
+    attachments: [
+      {
+        originalName: String,
+        filename: String,
+        mimeType: String,
+        size: Number,
+        path: String,
+        url: String,
+        data: Buffer,
+        dataUrl: String,
+        cid: String,
+        contentDisposition: String,
+      },
+    ],
+
+    // Alias used by the frontend for uploaded email files
+    uploadedFiles: [
+      {
+        originalName: String,
+        filename: String,
+        mimeType: String,
+        size: Number,
+        path: String,
+        url: String,
+        data: Buffer,
+        dataUrl: String,
+        cid: String,
+        contentDisposition: String,
+      },
+    ],
   },
   {
     timestamps: true,

@@ -1,44 +1,26 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import cron from "node-cron";
+import path from "path";
 import connectDB from "./db.js";
 import emailRoutes from "./routes/emailRoutes.js";
-import processEmails from "./emailProcessor.js";
+import { startEmailPolling } from "./emailProcessor.js";
 
 dotenv.config();
 
 const app = express();
-let isProcessingEmails = false;
+const UPLOADS_ROOT = path.resolve(
+  process.env.UPLOADS_ROOT || path.resolve(process.cwd(), "uploads")
+);
 
 app.use(cors());
 app.use(express.json());
-
+app.use("/uploads", express.static(UPLOADS_ROOT));
 app.get("/", (_req, res) => {
   res.json({ message: "API is running" });
 });
 
 app.use("/api/emails", emailRoutes);
-
-const startEmailCron = () => {
-  cron.schedule("*/10 * * * * *", async () => {
-    if (isProcessingEmails) {
-      console.log("Checking emails skipped: previous run still in progress.");
-      return;
-    }
-
-    isProcessingEmails = true;
-
-    try {
-      console.log("Checking emails...");
-      await processEmails();
-    } catch (err) {
-      console.error("Email cron error:", err.message);
-    } finally {
-      isProcessingEmails = false;
-    }
-  });
-};
 
 const startServer = async () => {
   await connectDB();
@@ -48,7 +30,7 @@ const startServer = async () => {
     console.log(`Server running on port ${port} 🚀`);
   });
 
-  startEmailCron();
+  startEmailPolling();
 };
 
 startServer();

@@ -1,20 +1,24 @@
-import imaps from "imap-simple";
+import Imap from "imap";
 import { simpleParser } from "mailparser";
 import nodemailer from "nodemailer";
+import dotenv from "dotenv";
 import Email from "./models/Email.js";
+import generateAIReply from "./aiReply.js";
+import path from "path";
+import fs from "fs/promises";
 
-const EMAIL = process.env.EMAIL_ADDRESS || "thinkreplyai@gmail.com";
-const PASSWORD = process.env.EMAIL_APP_PASSWORD || "thinkreply@123";
+dotenv.config();
 
-const imapConfig = {
-  imap: {
-    user: EMAIL,
-    password: PASSWORD,
-    host: "imap.gmail.com",
-    port: 993,
-    tls: true,
-  },
-};
+const EMAIL = (process.env.EMAIL_ADDRESS || "aireplybot123@gmail.com").trim();
+const PASSWORD = (process.env.EMAIL_APP_PASSWORD || "").replace(/\s+/g, "");
+
+const IMAP_HOST_GMAIL = process.env.IMAP_SMTP_HOST_GMAIL || "imap.gmail.com";
+const IMAP_HOST_YAHOO = process.env.IMAP_SMTP_HOST_YAHOO || "imap.mail.yahoo.com";
+const IMAP_HOST_PORT = Number(process.env.IMAP_SMTP_HOST_PORT || 993);
+const IMAP_ALLOW_SELF_SIGNED = process.env.IMAP_ALLOW_SELF_SIGNED === "true";
+
+const FETCH_INTERVAL_MS = Number(process.env.FETCH_INTERVAL_MS || 5000);
+const SESSION_MS = Number(process.env.SESSION_MS || 300000);
 
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -24,70 +28,449 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-export const processEmails = async () => {
-  let connection;
+const ASSISTANT_NAME = "Vishnupriya";
+const ASSISTANT_ROLE = "Ai Agent";
+const COMPANY_NAME = "Ai Agent";
 
-  try {
-    connection = await imaps.connect(imapConfig);
-    await connection.openBox("INBOX");
-
-    const messages = await connection.search(["UNSEEN"], {
-      bodies: [""],
-    });
-
-    for (const item of messages) {
-      const rawBody = item.parts?.find((part) => part.which === "")?.body;
-
-      if (!rawBody) {
-        continue;
-      }
-
-      const parsed = await simpleParser(rawBody);
-      const fromEmail = parsed.from?.value?.[0]?.address;
-
-      if (!fromEmail) {
-        continue;
-      }
-
-      const subject = parsed.subject || "No Subject";
-      const threadId =
-        parsed.messageId || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-
-      await Email.create({
-        subject,
-        sender: fromEmail,
-        receiver: EMAIL,
-        content: parsed.text || "",
-        isInbound: true,
-        threadId,
-      });
-
-      const replyText = "Thanks for your email. We will get back to you soon.";
-
-      await transporter.sendMail({
-        from: EMAIL,
-        to: fromEmail,
-        subject: `Re: ${subject}`,
-        text: replyText,
-      });
-
-      await Email.create({
-        subject: `Re: ${subject}`,
-        sender: EMAIL,
-        receiver: fromEmail,
-        content: replyText,
-        isInbound: false,
-        aiGenerated: true,
-        threadId,
-      });
-    }
-  } catch (err) {
-    console.error("Error:", err.message);
-  } finally {
-    if (connection) {
-      connection.end();
-    }
-  }
+const MIME_EXTENSIONS = {
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/png": ".png",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+  "application/pdf": ".pdf",
+  "text/plain": ".txt",
+  "application/zip": ".zip",
 };
 
-export default processEmails;
+const normalizeMessageId = (value) =>
+  (value || "")
+    .toString()
+    .trim()
+    .replace(/^<+/, "")
+    .replace(/>+$/, "");
+
+const extractMessageIds = (value) => {
+  if (!value) {
+    return [];
+  }
+
+  const values = Array.isArray(value) ? value : [value];
+  const ids = [];
+
+  for (const item of values) {
+    const text = (item || "").toString().trim();
+    if (!text) {
+      continue;
+    }
+
+    const matches = text.match(/<[^>]+>/g);
+    if (matches?.length) {
+      ids.push(...matches.map(normalizeMessageId));
+      continue;
+    }
+
+    ids.push(
+      ...text
+        .split(/[\s,]+/)
+        .map(normalizeMessageId)
+        .filter(Boolean)
+    );
+  }
+
+  return [...new Set(ids.filter(Boolean))];
+};
+
+const formatMessageIdHeader = (value) => {
+  const ids = extractMessageIds(value);
+
+  if (!ids.length) {
+    return undefined;
+  }
+
+  return ids.map((id) => `<${id}>`).join(" ");
+};
+
+const formatSenderName = (parsedFrom, fallbackEmail) => {
+  const displayName = parsedFrom?.value?.[0]?.name?.trim();
+  if (displayName) {
+    return displayName;
+  }
+
+  const localPart = (fallbackEmail || "").split("@")[0].replace(/[._-]+/g, " ").trim();
+  if (!localPart) {
+    return "there";
+  }
+
+  return localPart.replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const sanitizeFilename = (name) =>
+  (name || "attachment")
+    .replace(/[^\w.\-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+const getAttachmentFilename = (attachment, uid, index) => {
+  const originalName = sanitizeFilename(attachment?.filename || attachment?.name);
+  const extFromMime = MIME_EXTENSIONS[(attachment?.contentType || "").toLowerCase()] || "";
+
+  if (originalName) {
+    return originalName.includes(".") ? originalName : `${originalName}${extFromMime}`;
+  }
+
+  return `attachment-${uid}-${index}${extFromMime || ""}`;
+};
+
+const ATTACHMENTS_DIR = path.join(process.cwd(), "uploads", "attachments");
+
+const saveAttachment = async (attachment, uid, index) => {
+  if (!attachment?.content || attachment.content.length === 0) {
+    console.log("Skipping empty attachment:", attachment);
+    return null;
+  }
+
+  await fs.mkdir(ATTACHMENTS_DIR, { recursive: true });
+
+  const filename = `${uid}-${index}-${getAttachmentFilename(attachment, uid, index)}`;
+  const filePath = path.join(ATTACHMENTS_DIR, filename);
+
+  const buffer = Buffer.isBuffer(attachment.content)
+    ? attachment.content
+    : Buffer.from(attachment.content);
+
+  await fs.writeFile(filePath, buffer);
+
+  return {
+    originalName: attachment?.filename || attachment?.name || filename,
+    filename,
+    mimeType: attachment?.contentType || "application/octet-stream",
+    size: buffer.length,
+    path: filePath,
+    url: `http://localhost:5000/uploads/attachments/${filename}`, // 🔥 IMPORTANT
+    cid: attachment?.cid || "",
+    contentDisposition: attachment?.contentDisposition || "",
+  };
+};
+
+const buildReplyText = (senderName, bodyText) => {
+  const cleanBody = (bodyText || "").trim();
+  const footerLines = [...new Set([ASSISTANT_NAME, ASSISTANT_ROLE, COMPANY_NAME].filter(Boolean))];
+
+  return [
+    `Dear ${senderName},`,
+    "",
+    cleanBody,
+    "",
+    "Best regards,",
+    ...footerLines,
+  ].join("\n");
+};
+
+const resolveImapHost = (emailAddress) => {
+  const domain = (emailAddress || "").split("@")[1]?.toLowerCase() || "";
+
+  if (domain.includes("gmail.com")) {
+    return IMAP_HOST_GMAIL;
+  }
+
+  if (domain.includes("yahoo.com")) {
+    return IMAP_HOST_YAHOO;
+  }
+
+  return process.env.IMAP_HOST || IMAP_HOST_GMAIL;
+};
+
+export const openInbox = (imap) =>
+  new Promise((resolve, reject) => {
+    imap.openBox("INBOX", (err, box) => {
+      if (err) {
+        return reject(err);
+      }
+
+      resolve(box);
+    });
+  });
+
+const markSeen = (imap, uid) =>
+  new Promise((resolve, reject) => {
+    imap.addFlags(uid, "\\Seen", (err) => {
+      if (err) {
+        return reject(err);
+      }
+
+      resolve();
+    });
+  });
+
+const fetchUnseenEmails = async (imap, emailAddress) => {
+  const uids = await new Promise((resolve, reject) => {
+    imap.search(["UNSEEN"], (err, results) => {
+      if (err) {
+        return reject(err);
+      }
+
+      resolve(results || []);
+    });
+  });
+
+  if (!uids.length) {
+    console.log("No unseen emails found.");
+    return 0;
+  }
+
+  const tasks = [];
+  const fetch = imap.fetch(uids, {
+    bodies: [""],
+    markSeen: false,
+  });
+
+  fetch.on("message", (msg) => {
+    let uid = null;
+    let rawBody = "";
+
+    msg.on("attributes", (attrs) => {
+      uid = attrs.uid;
+    });
+
+    msg.on("body", (stream) => {
+      stream.on("data", (chunk) => {
+        rawBody += chunk.toString("utf8");
+      });
+    });
+
+    msg.once("end", () => {
+      tasks.push(
+        (async () => {
+          if (!uid || !rawBody) {
+            return;
+          }
+
+          const parsed = await simpleParser(rawBody);
+          const fromEmail = parsed.from?.value?.[0]?.address;
+          const senderName = formatSenderName(parsed.from, fromEmail);
+          const messageId = normalizeMessageId(parsed.messageId) || String(uid);
+          const inReplyToIds = extractMessageIds(parsed.inReplyTo);
+          const referenceIds = extractMessageIds(parsed.references);
+          const threadMatch =
+            inReplyToIds.length || referenceIds.length
+              ? await Email.findOne({
+                  messageId: {
+                    $in: [...inReplyToIds, ...referenceIds],
+                  },
+                }).sort({ createdAt: -1 })
+              : null;
+          const threadId = threadMatch?.threadId || messageId;
+
+          if (!fromEmail) {
+            await markSeen(imap, uid);
+            return;
+          }
+
+          const subject = parsed.subject || "No Subject";
+
+          const exists = await Email.findOne({ messageId });
+          if (exists) {
+            console.log(`Duplicate email skipped: ${messageId}`);
+            await markSeen(imap, uid);
+            return;
+          }
+
+          const attachments = await Promise.all(
+            (parsed.attachments || []).map((attachment, index) =>
+              saveAttachment(attachment, uid, index)
+            )
+          );
+          console.log('attachments>>>>>>>>>', attachments);
+          const savedAttachments = attachments.filter(Boolean);
+          console.log('savedAttachments>>>>>>>>', savedAttachments);
+
+          await Email.create({
+            subject,
+            sender: fromEmail,
+            receiver: emailAddress,
+            content: parsed.text || "",
+            isInbound: true,
+            threadId,
+            messageId,
+            inReplyTo: inReplyToIds[0] || "",
+            references: referenceIds,
+            attachments: savedAttachments,
+          });
+
+          const replyText = await generateAIReply(
+            parsed.text || subject,
+            subject || "general",
+            savedAttachments
+          );
+          const fullReplyText = buildReplyText(senderName, replyText);
+
+          const sendInfo = await transporter.sendMail({
+            from: emailAddress,
+            to: fromEmail,
+            subject: `Re: ${subject}`,
+            text: fullReplyText,
+            inReplyTo: formatMessageIdHeader(messageId),
+            references: formatMessageIdHeader([...referenceIds, messageId]),
+          });
+
+          const outgoingMessageId = normalizeMessageId(sendInfo?.messageId);
+
+          await Email.create({
+            subject: `Re: ${subject}`,
+            sender: emailAddress,
+            receiver: fromEmail,
+            content: fullReplyText,
+            isInbound: false,
+            aiGenerated: true,
+            threadId,
+            messageId: outgoingMessageId || `${messageId}-reply`,
+            inReplyTo: messageId,
+            references: [...referenceIds, messageId].filter(Boolean),
+          });
+
+          await markSeen(imap, uid);
+          console.log(`Processed email: ${subject}`);
+        })().catch((err) => {
+          console.error("Message processing error:", err.message);
+        })
+      );
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    fetch.once("error", reject);
+    fetch.once("end", resolve);
+  });
+
+  await Promise.all(tasks);
+  return tasks.length;
+};
+
+export async function connectToImap(config, jsonData) {
+  return new Promise((resolve, reject) => {
+    const emailAddress = (config?.emailAddress || EMAIL).trim();
+    const password = (jsonData?.password || PASSWORD).replace(/\s+/g, "");
+    const imapHost = resolveImapHost(emailAddress);
+
+    const imap = new Imap({
+      user: emailAddress,
+      password,
+      host: imapHost,
+      port: IMAP_HOST_PORT,
+      tls: true,
+      keepalive: true,
+      authTimeout: 100000,
+      connTimeout: 300000,
+      tlsOptions: {
+        rejectUnauthorized: !IMAP_ALLOW_SELF_SIGNED,
+      },
+    });
+
+    let intervalId = null;
+    let stopTimer = null;
+    let isFetching = false;
+
+    const pollInbox = async () => {
+      if (isFetching) {
+        return;
+      }
+
+      isFetching = true;
+
+      try {
+        await fetchUnseenEmails(imap, emailAddress);
+      } finally {
+        isFetching = false;
+      }
+    };
+
+    imap.once("ready", async () => {
+      try {
+        console.log(`IMAP connected for: ${emailAddress}`);
+        await openInbox(imap);
+        console.log(`Inbox opened for: ${emailAddress}`);
+
+        await pollInbox();
+        intervalId = setInterval(pollInbox, FETCH_INTERVAL_MS);
+
+        stopTimer = setTimeout(() => {
+          if (intervalId) {
+            clearInterval(intervalId);
+          }
+          imap.end();
+          resolve(true);
+        }, SESSION_MS);
+      } catch (err) {
+        if (intervalId) {
+          clearInterval(intervalId);
+        }
+        if (stopTimer) {
+          clearTimeout(stopTimer);
+        }
+        imap.end();
+        reject(err);
+      }
+    });
+
+    imap.once("error", (err) => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+      if (stopTimer) {
+        clearTimeout(stopTimer);
+      }
+      console.error(`IMAP Error for ${emailAddress}:`, err.message);
+      reject(err);
+    });
+
+    imap.once("end", () => {
+      console.log(`IMAP disconnected for: ${emailAddress}`);
+    });
+
+    try {
+      imap.connect();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+export async function imapSmtpInboxHandler() {
+  try {
+    await connectToImap(
+      {
+        emailAddress: EMAIL,
+      },
+      {
+        password: PASSWORD,
+      }
+    );
+  } catch (err) {
+    console.error("imapSmtpInboxHandler error:", err.message);
+  }
+}
+
+export function startEmailPolling() {
+  let sessionRunning = false;
+
+  const runSession = async () => {
+    if (sessionRunning) {
+      console.log("Email session already running, skipping reconnect.");
+      return;
+    }
+
+    sessionRunning = true;
+
+    try {
+      await imapSmtpInboxHandler();
+    } finally {
+      sessionRunning = false;
+    }
+  };
+
+  runSession();
+  setInterval(runSession, SESSION_MS);
+}
+
+export default imapSmtpInboxHandler;
