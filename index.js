@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import connectDB from "./db.js";
+import authRoutes from "./routes/authRoutes.js";
 import emailRoutes from "./routes/emailRoutes.js";
 import { startEmailPolling } from "./emailProcessor.js";
 
@@ -20,6 +21,7 @@ app.get("/", (_req, res) => {
   res.json({ message: "API is running" });
 });
 
+app.use("/api/auth", authRoutes);
 app.use("/api/emails", emailRoutes);
 
 const startServer = async () => {

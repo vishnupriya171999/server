@@ -3,14 +3,14 @@ import { simpleParser } from "mailparser";
 import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 import Email from "./models/Email.js";
+import EmailAccount from "./models/EmailAccount.js";
 import generateAIReply from "./aiReply.js";
 import path from "path";
 import fs from "fs/promises";
 
 dotenv.config();
 
-const EMAIL = (process.env.EMAIL_ADDRESS || "aireplybot123@gmail.com").trim();
-const PASSWORD = (process.env.EMAIL_APP_PASSWORD || "").replace(/\s+/g, "");
+const normalizePassword = (value) => String(value || "").replace(/\s+/g, "");
 
 const IMAP_HOST_GMAIL = process.env.IMAP_SMTP_HOST_GMAIL || "imap.gmail.com";
 const IMAP_HOST_YAHOO = process.env.IMAP_SMTP_HOST_YAHOO || "imap.mail.yahoo.com";
@@ -19,14 +19,6 @@ const IMAP_ALLOW_SELF_SIGNED = process.env.IMAP_ALLOW_SELF_SIGNED === "true";
 
 const FETCH_INTERVAL_MS = Number(process.env.FETCH_INTERVAL_MS || 5000);
 const SESSION_MS = Number(process.env.SESSION_MS || 300000);
-
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: EMAIL,
-    pass: PASSWORD,
-  },
-});
 
 const ASSISTANT_NAME = "Vishnupriya";
 const ASSISTANT_ROLE = "Ai Agent";
@@ -181,6 +173,94 @@ const resolveImapHost = (emailAddress) => {
   return process.env.IMAP_HOST || IMAP_HOST_GMAIL;
 };
 
+const getProviderFromEmail = (emailAddress) => {
+  const domain = (emailAddress || "").split("@")[1]?.toLowerCase() || "";
+
+  if (domain.includes("yahoo")) {
+    return "yahoo";
+  }
+
+  return "gmail";
+};
+
+const resolveSmtpConfig = (emailAddress) => {
+  const provider = getProviderFromEmail(emailAddress);
+
+  if (provider === "yahoo") {
+    return {
+      host: process.env.SMTP_HOST_YAHOO || "smtp.mail.yahoo.com",
+      port: Number(process.env.SMTP_HOST_PORT || 465),
+      secure: true,
+    };
+  }
+
+  return {
+    host: process.env.SMTP_HOST_GMAIL || "smtp.gmail.com",
+    port: Number(process.env.SMTP_HOST_PORT || 465),
+    secure: true,
+  };
+};
+
+const createImapClient = ({ emailAddress, password, keepalive = false }) =>
+  new Imap({
+    user: emailAddress,
+    password: normalizePassword(password),
+    host: resolveImapHost(emailAddress),
+    port: IMAP_HOST_PORT,
+    tls: true,
+    keepalive,
+    authTimeout: 30000,
+    connTimeout: 30000,
+    tlsOptions: {
+      rejectUnauthorized: !IMAP_ALLOW_SELF_SIGNED,
+    },
+  });
+
+const createSmtpTransporter = ({ emailAddress, password }) =>
+  nodemailer.createTransport({
+    ...resolveSmtpConfig(emailAddress),
+    auth: {
+      user: emailAddress,
+      pass: normalizePassword(password),
+    },
+  });
+
+export const verifyMailboxCredentials = async ({ emailAddress, password }) =>
+  new Promise((resolve, reject) => {
+    const imap = createImapClient({ emailAddress, password });
+
+    const cleanup = () => {
+      imap.removeAllListeners("ready");
+      imap.removeAllListeners("error");
+      imap.removeAllListeners("end");
+    };
+
+    imap.once("ready", async () => {
+      try {
+        await openInbox(imap);
+        cleanup();
+        imap.end();
+        resolve(true);
+      } catch (err) {
+        cleanup();
+        imap.end();
+        reject(err);
+      }
+    });
+
+    imap.once("error", (err) => {
+      cleanup();
+      reject(err);
+    });
+
+    try {
+      imap.connect();
+    } catch (err) {
+      cleanup();
+      reject(err);
+    }
+  });
+
 export const openInbox = (imap) =>
   new Promise((resolve, reject) => {
     imap.openBox("INBOX", (err, box) => {
@@ -203,7 +283,8 @@ const markSeen = (imap, uid) =>
     });
   });
 
-const fetchUnseenEmails = async (imap, emailAddress) => {
+const fetchUnseenEmails = async (imap, emailAddress, password) => {
+  const transporter = createSmtpTransporter({ emailAddress, password });
   const uids = await new Promise((resolve, reject) => {
     imap.search(["UNSEEN"], (err, results) => {
       if (err) {
@@ -255,9 +336,8 @@ const fetchUnseenEmails = async (imap, emailAddress) => {
           const threadMatch =
             inReplyToIds.length || referenceIds.length
               ? await Email.findOne({
-                  messageId: {
-                    $in: [...inReplyToIds, ...referenceIds],
-                  },
+                  messageId: { $in: [...inReplyToIds, ...referenceIds] },
+                  $or: [{ sender: emailAddress }, { receiver: emailAddress }],
                 }).sort({ createdAt: -1 })
               : null;
           const threadId = threadMatch?.threadId || messageId;
@@ -269,7 +349,7 @@ const fetchUnseenEmails = async (imap, emailAddress) => {
 
           const subject = parsed.subject || "No Subject";
 
-          const exists = await Email.findOne({ messageId });
+          const exists = await Email.findOne({ messageId, receiver: emailAddress });
           if (exists) {
             console.log(`Duplicate email skipped: ${messageId}`);
             await markSeen(imap, uid);
@@ -349,27 +429,68 @@ const fetchUnseenEmails = async (imap, emailAddress) => {
 
 export async function connectToImap(config, jsonData) {
   return new Promise((resolve, reject) => {
-    const emailAddress = (config?.emailAddress || EMAIL).trim();
-    const password = (jsonData?.password || PASSWORD).replace(/\s+/g, "");
-    const imapHost = resolveImapHost(emailAddress);
+    const emailAddress = String(config?.emailAddress || "").trim().toLowerCase();
+    const password = normalizePassword(jsonData?.password);
 
-    const imap = new Imap({
-      user: emailAddress,
-      password,
-      host: imapHost,
-      port: IMAP_HOST_PORT,
-      tls: true,
-      keepalive: true,
-      authTimeout: 100000,
-      connTimeout: 300000,
-      tlsOptions: {
-        rejectUnauthorized: !IMAP_ALLOW_SELF_SIGNED,
-      },
-    });
+    if (!emailAddress || !password) {
+      reject(new Error("Email address and app password are required."));
+      return;
+    }
+
+    const imap = createImapClient({ emailAddress, password, keepalive: true });
 
     let intervalId = null;
     let stopTimer = null;
     let isFetching = false;
+    let settled = false;
+
+    const clearTimers = () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+
+      if (stopTimer) {
+        clearTimeout(stopTimer);
+        stopTimer = null;
+      }
+    };
+
+    const finishResolve = (value) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimers();
+      resolve(value);
+    };
+
+    const finishReject = (err) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimers();
+      reject(err);
+    };
+
+    const stopSession = () => {
+      clearTimers();
+
+      try {
+        imap.end();
+      } catch {
+        // Ignore disconnect errors during logout cleanup.
+      }
+
+      finishResolve(false);
+    };
+
+    if (typeof config?.onSessionStart === "function") {
+      config.onSessionStart({ stop: stopSession });
+    }
 
     const pollInbox = async () => {
       if (isFetching) {
@@ -379,7 +500,7 @@ export async function connectToImap(config, jsonData) {
       isFetching = true;
 
       try {
-        await fetchUnseenEmails(imap, emailAddress);
+        await fetchUnseenEmails(imap, emailAddress, password);
       } finally {
         isFetching = false;
       }
@@ -395,33 +516,18 @@ export async function connectToImap(config, jsonData) {
         intervalId = setInterval(pollInbox, FETCH_INTERVAL_MS);
 
         stopTimer = setTimeout(() => {
-          if (intervalId) {
-            clearInterval(intervalId);
-          }
           imap.end();
-          resolve(true);
+          finishResolve(true);
         }, SESSION_MS);
       } catch (err) {
-        if (intervalId) {
-          clearInterval(intervalId);
-        }
-        if (stopTimer) {
-          clearTimeout(stopTimer);
-        }
         imap.end();
-        reject(err);
+        finishReject(err);
       }
     });
 
     imap.once("error", (err) => {
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
-      if (stopTimer) {
-        clearTimeout(stopTimer);
-      }
       console.error(`IMAP Error for ${emailAddress}:`, err.message);
-      reject(err);
+      finishReject(err);
     });
 
     imap.once("end", () => {
@@ -431,42 +537,94 @@ export async function connectToImap(config, jsonData) {
     try {
       imap.connect();
     } catch (err) {
-      reject(err);
+      finishReject(err);
     }
   });
 }
 
-export async function imapSmtpInboxHandler() {
-  try {
-    await connectToImap(
-      {
-        emailAddress: EMAIL,
-      },
-      {
-        password: PASSWORD,
-      }
-    );
-  } catch (err) {
-    console.error("imapSmtpInboxHandler error:", err.message);
+const activeMailboxSessions = new Map();
+
+export function startMailboxSession(account) {
+  const emailAddress = String(account?.emailAddress || "").trim().toLowerCase();
+  const password = normalizePassword(account?.password);
+
+  if (!emailAddress || !password) {
+    return false;
   }
+
+  if (activeMailboxSessions.has(emailAddress)) {
+    console.log(`Mailbox session already running for: ${emailAddress}`);
+    return false;
+  }
+
+  let stopSession = null;
+  const session = connectToImap(
+    {
+      emailAddress,
+      onSessionStart: ({ stop }) => {
+        stopSession = stop;
+      },
+    },
+    {
+      password,
+    }
+  )
+    .catch((err) => {
+      console.error(`Mailbox session error for ${emailAddress}:`, err.message);
+    })
+    .finally(() => {
+      activeMailboxSessions.delete(emailAddress);
+    });
+
+  activeMailboxSessions.set(emailAddress, {
+    session,
+    stop: () => {
+      if (typeof stopSession === "function") {
+        stopSession();
+      }
+    },
+  });
+  return true;
+}
+
+export function stopMailboxSession(emailAddress) {
+  const normalizedEmail = String(emailAddress || "").trim().toLowerCase();
+  const activeSession = activeMailboxSessions.get(normalizedEmail);
+
+  if (!activeSession) {
+    return false;
+  }
+
+  activeSession.stop();
+  activeMailboxSessions.delete(normalizedEmail);
+  console.log(`Mailbox session stopped for: ${normalizedEmail}`);
+  return true;
+}
+
+export async function imapSmtpInboxHandler() {
+  const linkedAccounts = await EmailAccount.find({
+    email: { $exists: true, $ne: "" },
+    emailPassword: { $exists: true, $ne: "" },
+  }).lean();
+
+  const accounts = linkedAccounts.map((account) => ({
+    emailAddress: account.email,
+    password: account.emailPassword,
+  }));
+
+  if (!accounts.length) {
+    console.log("No mailbox accounts configured for AI reply polling.");
+    return;
+  }
+
+  accounts.forEach(startMailboxSession);
 }
 
 export function startEmailPolling() {
-  let sessionRunning = false;
-
-  const runSession = async () => {
-    if (sessionRunning) {
-      console.log("Email session already running, skipping reconnect.");
-      return;
-    }
-
-    sessionRunning = true;
-
-    try {
-      await imapSmtpInboxHandler();
-    } finally {
-      sessionRunning = false;
-    }
+  const runSession = () => {
+    void imapSmtpInboxHandler().catch((err) => {
+      console.error("Email polling error:", err.message);
+    });
   };
 
   runSession();
