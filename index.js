@@ -5,6 +5,7 @@ import path from "path";
 import connectDB from "./db.js";
 import authRoutes from "./routes/authRoutes.js";
 import emailRoutes from "./routes/emailRoutes.js";
+import knowledgeRoutes from "./routes/knowledgeRoutes.js";
 import { startEmailPolling } from "./emailProcessor.js";
 
 dotenv.config();
@@ -23,6 +24,7 @@ app.get("/", (_req, res) => {
 
 app.use("/api/auth", authRoutes);
 app.use("/api/emails", emailRoutes);
+app.use("/api/knowledge", knowledgeRoutes);
 
 const startServer = async () => {
   await connectDB();

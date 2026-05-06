@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
+import { formatKnowledgeContext, searchKnowledgeBase } from "./services/meiliClient.js";
 
 dotenv.config();
 
@@ -244,6 +245,7 @@ async function generateAIReply(emailText, moduleContext = "general", attachments
   const attachmentContext = await describeAttachments(attachments);
   const incomingText = safePreview(emailText, 3000);
   let imageAnalysis = "";
+  let knowledgeContext = "";
 
   try {
     imageAnalysis = await analyzeImageAttachments(attachments);
@@ -252,16 +254,27 @@ async function generateAIReply(emailText, moduleContext = "general", attachments
   }
 
   try {
+    const knowledgeHits = await searchKnowledgeBase(
+      [moduleContext, incomingText].filter(Boolean).join("\n"),
+      { limit: 5 }
+    );
+    knowledgeContext = formatKnowledgeContext(knowledgeHits);
+  } catch (err) {
+    console.error("Knowledge lookup error:", err.message);
+  }
+
+  try {
     const chatCompletion = await groq.chat.completions.create({
       messages: [
         {
           role: "system",
-          content: `You are an assistant for a company. Generate a professional, friendly, and concise email body only. Do not include a greeting, closing, signature, or placeholders like "Dear [Name]". Module context: ${moduleContext}. If attachments are provided, use them as part of the incoming message context and never say there is no attachment when the attachment list is non-empty. If Image analysis is provided, answer from that analysis and describe the image clearly.`,
+          content: `You are an assistant for a company. Generate a professional, friendly, and concise email body only. Do not include a greeting, closing, signature, or placeholders like "Dear [Name]". Module context: ${moduleContext}. If Knowledge base context is provided, use it as the source of truth for policies, FAQs, templates, and support facts. If the knowledge base does not contain the answer, give a helpful next step without inventing policy details. If attachments are provided, use them as part of the incoming message context and never say there is no attachment when the attachment list is non-empty. If Image analysis is provided, answer from that analysis and describe the image clearly.`,
         },
         {
           role: "user",
           content: [
             `Incoming email content: "${incomingText}"`,
+            knowledgeContext ? `Knowledge base context:\n${knowledgeContext}` : "",
             attachmentContext ? `Attachments:\n${attachmentContext}` : "",
             imageAnalysis ? `Image analysis:\n${imageAnalysis}` : "",
           ]
