@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import Email from "./models/Email.js";
 import EmailAccount from "./models/EmailAccount.js";
 import generateAIReply from "./aiReply.js";
+import { getAutoReplyBlockReason, stripQuotedReplyText } from "./services/autoReplyGuard.js";
 import path from "path";
 import fs from "fs/promises";
 
@@ -348,6 +349,7 @@ const fetchUnseenEmails = async (imap, emailAddress, password) => {
           }
 
           const subject = parsed.subject || "No Subject";
+          const visibleBody = stripQuotedReplyText(parsed.text || "");
 
           const exists = await Email.findOne({ messageId, receiver: emailAddress });
           if (exists) {
@@ -369,7 +371,7 @@ const fetchUnseenEmails = async (imap, emailAddress, password) => {
             subject,
             sender: fromEmail,
             receiver: emailAddress,
-            content: parsed.text || "",
+            content: visibleBody || parsed.text || "",
             isInbound: true,
             threadId,
             messageId,
@@ -378,8 +380,35 @@ const fetchUnseenEmails = async (imap, emailAddress, password) => {
             attachments: savedAttachments,
           });
 
+          const blockReason = getAutoReplyBlockReason({
+            email: fromEmail,
+            subject,
+            body: visibleBody,
+            mailboxEmail: emailAddress,
+          });
+
+          if (blockReason) {
+            console.log(`Skipping auto-reply for ${fromEmail}: ${blockReason}`);
+            await markSeen(imap, uid);
+            return;
+          }
+
+          const alreadyRepliedToThisMessage = await Email.exists({
+            isInbound: false,
+            aiGenerated: true,
+            inReplyTo: messageId,
+            sender: emailAddress,
+            receiver: fromEmail,
+          });
+
+          if (alreadyRepliedToThisMessage) {
+            console.log(`Skipping duplicate auto-reply for inbound message: ${messageId}`);
+            await markSeen(imap, uid);
+            return;
+          }
+
           const replyText = await generateAIReply(
-            parsed.text || subject,
+            visibleBody || parsed.text || subject,
             subject || "general",
             savedAttachments
           );

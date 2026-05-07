@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import multer from "multer";
 import Email from "../models/Email.js";
 import generateAIReply from "../aiReply.js";
+import { getAutoReplyBlockReason, stripQuotedReplyText } from "../services/autoReplyGuard.js";
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -210,6 +211,52 @@ const resolveThreadContext = async (body) => {
 };
 
 // 📩 CREATE EMAIL + AUTO AI REPLY
+router.post("/ai-reply", async (req, res) => {
+  try {
+    const sender = req.body.sender || req.body.from || "";
+    const subject = req.body.subject || "general";
+    const latestMessage = stripQuotedReplyText(
+      req.body.latestMessage || req.body.content || req.body.body || ""
+    );
+    const messages = Array.isArray(req.body.messages) ? req.body.messages : [];
+    const threadContext = messages
+      .map((message) =>
+        [
+          message.isInbound ? "Customer" : "Agent",
+          message.subject,
+          message.body,
+        ]
+          .filter(Boolean)
+          .join(": ")
+      )
+      .join("\n\n");
+    const emailText = [latestMessage, threadContext].filter(Boolean).join("\n\n");
+    const blockReason = getAutoReplyBlockReason({
+      email: sender,
+      subject,
+      body: latestMessage,
+      mailboxEmail: req.body.recipient || req.body.receiver || "",
+    });
+
+    if (blockReason) {
+      return res.status(403).json({
+        message: "AI reply draft skipped for this sender.",
+        reason: blockReason,
+      });
+    }
+
+    const reply = await generateAIReply(emailText || subject, subject, []);
+
+    return res.json({
+      reply,
+      draft: reply,
+      content: reply,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+});
+
 router.post("/add", upload.any(), async (req, res) => {
   try {
     const isInbound = toBoolean(req.body.isInbound);
@@ -242,7 +289,16 @@ router.post("/add", upload.any(), async (req, res) => {
     // If inbound → auto reply
     let aiReply = null;
 
-    if (isInbound) {
+    const blockReason = isInbound
+      ? getAutoReplyBlockReason({
+          email: req.body.sender,
+          subject: req.body.subject,
+          body: stripQuotedReplyText(req.body.content),
+          mailboxEmail: req.body.receiver,
+        })
+      : "";
+
+    if (isInbound && !blockReason) {
       const emailText = [req.body.content, req.body.subject]
         .filter(Boolean)
         .join("\n\n");
@@ -264,12 +320,16 @@ router.post("/add", upload.any(), async (req, res) => {
         references: [...threadContext.references, threadContext.messageId].filter(Boolean),
         messageId: buildFallbackMessageId("reply"),
       });
+    } else if (blockReason) {
+      console.log(`Skipping auto-reply for ${req.body.sender}: ${blockReason}`);
     }
 
     res.status(201).json({
       email: serializeEmailDoc(email),
       aiReply: serializeEmailDoc(aiReply),
       threadId: threadContext.threadId,
+      autoReplySkipped: Boolean(blockReason),
+      autoReplySkipReason: blockReason || undefined,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

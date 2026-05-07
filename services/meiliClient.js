@@ -88,3 +88,11 @@ export const formatKnowledgeContext = (hits = []) =>
       return [`${index + 1}. ${title}`, category, body].filter(Boolean).join("\n");
     })
     .join("\n\n");
+
+export const getKnowledgeServiceUnavailableResponse = (err) => ({
+  message:
+    "Knowledge search is unavailable because Meilisearch is not reachable from this backend.",
+  detail: err?.message || "Meilisearch request failed.",
+  fix:
+    "Set MEILI_HOST to a reachable Meilisearch server URL. On Render, localhost:7700 only points to the API service itself, not your local computer.",
+});

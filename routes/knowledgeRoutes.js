@@ -1,7 +1,12 @@
 import crypto from "crypto";
 import express from "express";
 import {
+  indexDocument,
+  searchDomainContext,
+} from "../services/documentIndexService.js";
+import {
   ensureKnowledgeIndex,
+  getKnowledgeServiceUnavailableResponse,
   knowledgeIndex,
   searchKnowledgeBase,
 } from "../services/meiliClient.js";
@@ -59,6 +64,45 @@ const normalizeDocument = (body) => {
   };
 };
 
+router.post("/upload", async (req, res) => {
+  try {
+    const result = await indexDocument({
+      document_url: req.body.document_url || req.body.local_path,
+      domain_id: req.body.domain_id,
+      title: req.body.title,
+    });
+
+    return res.status(202).json({
+      message: "Indexed",
+      ...result,
+    });
+  } catch (err) {
+    if (/localhost:7700|fetch failed|ECONNREFUSED|has failed/i.test(err.message || "")) {
+      return res.status(503).json(getKnowledgeServiceUnavailableResponse(err));
+    }
+
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/search-context", async (req, res) => {
+  try {
+    const result = await searchDomainContext({
+      query: req.body.query,
+      domain_id: req.body.domain_id,
+      limit: Number(req.body.limit || 5),
+    });
+
+    return res.json(result);
+  } catch (err) {
+    if (/localhost:7700|fetch failed|ECONNREFUSED|has failed/i.test(err.message || "")) {
+      return res.status(503).json(getKnowledgeServiceUnavailableResponse(err));
+    }
+
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 router.post("/documents", async (req, res) => {
   try {
     const items = Array.isArray(req.body) ? req.body : [req.body];
@@ -80,6 +124,10 @@ router.post("/documents", async (req, res) => {
       documents,
     });
   } catch (err) {
+    if (/localhost:7700|fetch failed|ECONNREFUSED|has failed/i.test(err.message || "")) {
+      return res.status(503).json(getKnowledgeServiceUnavailableResponse(err));
+    }
+
     return res.status(500).json({ message: err.message });
   }
 });
@@ -94,6 +142,10 @@ router.get("/documents", async (req, res) => {
       documents: result.results || [],
     });
   } catch (err) {
+    if (/localhost:7700|fetch failed|ECONNREFUSED|has failed/i.test(err.message || "")) {
+      return res.status(503).json(getKnowledgeServiceUnavailableResponse(err));
+    }
+
     return res.status(500).json({ message: err.message });
   }
 });
@@ -106,6 +158,10 @@ router.get("/search", async (req, res) => {
 
     return res.json({ hits });
   } catch (err) {
+    if (/localhost:7700|fetch failed|ECONNREFUSED|has failed/i.test(err.message || "")) {
+      return res.status(503).json(getKnowledgeServiceUnavailableResponse(err));
+    }
+
     return res.status(500).json({ message: err.message });
   }
 });
@@ -117,6 +173,10 @@ router.get("/documents/:id", async (req, res) => {
 
     return res.json(document);
   } catch (err) {
+    if (/localhost:7700|fetch failed|ECONNREFUSED|has failed/i.test(err.message || "")) {
+      return res.status(503).json(getKnowledgeServiceUnavailableResponse(err));
+    }
+
     const status = err.code === "document_not_found" ? 404 : 500;
     return res.status(status).json({ message: err.message });
   }
@@ -132,6 +192,10 @@ router.delete("/documents/:id", async (req, res) => {
       taskUid: task.taskUid,
     });
   } catch (err) {
+    if (/localhost:7700|fetch failed|ECONNREFUSED|has failed/i.test(err.message || "")) {
+      return res.status(503).json(getKnowledgeServiceUnavailableResponse(err));
+    }
+
     return res.status(500).json({ message: err.message });
   }
 });
@@ -168,6 +232,10 @@ router.post("/seed", async (_req, res) => {
       documents: seedDocs,
     });
   } catch (err) {
+    if (/localhost:7700|fetch failed|ECONNREFUSED|has failed/i.test(err.message || "")) {
+      return res.status(503).json(getKnowledgeServiceUnavailableResponse(err));
+    }
+
     return res.status(500).json({ message: err.message });
   }
 });
