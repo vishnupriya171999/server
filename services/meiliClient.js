@@ -3,8 +3,8 @@ import { Meilisearch } from "meilisearch";
 
 dotenv.config({ quiet: true });
 
-const MEILI_HOST = process.env.MEILI_HOST || "http://localhost:7700";
-const MEILI_MASTER_KEY = process.env.MEILI_MASTER_KEY || "";
+const MEILI_HOST = process.env.MEILI_HOST || "http://172.31.45.127:8001";
+const MEILI_MASTER_KEY = process.env.MEILI_MASTER_KEY || "vp";
 const KNOWLEDGE_INDEX = process.env.MEILI_KNOWLEDGE_INDEX || "knowledge_base";
 
 export const meiliClient = new Meilisearch({
