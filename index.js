@@ -26,6 +26,14 @@ app.use("/api/auth", authRoutes);
 app.use("/api/emails", emailRoutes);
 app.use("/api/knowledge", knowledgeRoutes);
 
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+});
+
 const startServer = async () => {
   await connectDB();
 

@@ -544,10 +544,10 @@ export async function connectToImap(config, jsonData) {
         await pollInbox();
         intervalId = setInterval(pollInbox, FETCH_INTERVAL_MS);
 
-        stopTimer = setTimeout(() => {
-          imap.end();
-          finishResolve(true);
-        }, SESSION_MS);
+        // stopTimer = setTimeout(() => {
+        //   imap.end();
+        //   finishResolve(true);
+        // }, SESSION_MS);
       } catch (err) {
         imap.end();
         finishReject(err);
@@ -559,9 +559,9 @@ export async function connectToImap(config, jsonData) {
       finishReject(err);
     });
 
-    imap.once("end", () => {
-      console.log(`IMAP disconnected for: ${emailAddress}`);
-    });
+    // imap.once("end", () => {
+    //   console.log(`IMAP disconnected for: ${emailAddress}`);
+    // });
 
     try {
       imap.connect();
@@ -650,14 +650,9 @@ export async function imapSmtpInboxHandler() {
 }
 
 export function startEmailPolling() {
-  const runSession = () => {
-    void imapSmtpInboxHandler().catch((err) => {
-      console.error("Email polling error:", err.message);
-    });
-  };
-
-  runSession();
-  setInterval(runSession, SESSION_MS);
+  void imapSmtpInboxHandler().catch((err) => {
+    console.error("Email polling error:", err.message);
+  });
 }
 
 export default imapSmtpInboxHandler;
